@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="ca">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Menú Setmanal</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+
+<!-- AFEGIT: llibreries per exportar PDF -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
+
+  </head>
+  <body class="bg-gray-100">
+    <div id="root"></div>
+
+    <script type="text/babel">
+
+      const { useState, useEffect } = React;
+
+      function isString(v) {
+        return typeof v === "string" || v instanceof String;
+      }
+
+      function safeSplitLines(value) {
+        if (isString(value)) return value.split("\n");
+        if (Array.isArray(value)) return value.flatMap((x) => (isString(x) ? x.split("\n") : []));
+        if (value == null) return [];
+        try {
+          return String(value).split("\n");
+        } catch {
+          return [];
+        }
+      }
+
+      function normalizeRecepta(r) {
+        return {
+          id: r?.id ?? Date.now() + Math.random(),
+          nom: isString(r?.nom) ? r.nom : String(r?.nom ?? ""),
+          categoria: isString(r?.categoria) ? r.categoria : String(r?.categoria ?? ""),
+          ingredients: isString(r?.ingredients)
+            ? r.ingredients
+            : Array.isArray(r?.ingredients)
+            ? r.ingredients.join("\n")
+            : String(r?.ingredients ?? ""),
+          passos: isString(r?.passos) ? r.passos : String(r?.passos ?? ""),
+        };
+      }
+
+      function parseCantidad(raw) {
+        if (!raw) return null;
+        const s = String(raw).replace(",", ".").trim();
+        if (/^\d+\s*\/\s*\d+$/.test(s)) {
+          const [a, b] = s.split("/").map((n) => parseFloat(n));
+          if (!isNaN(a) && !isNaN(b) && b !== 0) return a / b;
+          return null;
+        }
+        const n = parseFloat(s);
+        return isNaN(n) ? null : n;
+      }
+
+      function parseIngredient(input) {
+        const ing = String(input ?? "").trim();
+        if (!ing) return { raw: "" };
+        const regex = /^(\d+(?:[.,]\d+)?|\d+\s*\/\s*\d+)?\s*([a-zA-Záéíóúüñµ°]+)?\s*(.*)$/;
+        const match = ing.match(regex);
+        if (!match) return { raw: ing };
+        const quantitat = parseCantidad(match[1]);
+        const unitat = (match[2] || "").trim();
+        const nom = (match[3] || "").trim().toLowerCase();
+
+        if (!nom) return { raw: ing };
+
+        return quantitat == null
+          ? { nom, unitat, text: ing }
+          : { quantitat, unitat, nom };
+      }
+
+      function agruparIngredients(ingredients) {
+        const mapa = {};
+
+        const norm = (s) =>
+          String(s ?? "")
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .trim()
+            .toLowerCase()
+            .replace(/\s+/g, " ");
+
+        const normUnit = (u) => {
+          const x = norm(u);
+          if (x === "gr" || x === "grams") return "g";
+          if (x === "kgs" || x === "kg.") return "kg";
+          if (x === "mls") return "ml";
+          if (x === "u." || x === "uds" || x === "ud" || x === "unitats") return "u";
+          return x;
+        };
+
+        const singular = (w) => {
+          let x = String(w || "").trim();
+          if (x.endsWith("s") && !x.endsWith("ss")) x = x.slice(0, -1);
+          return x;
+        };
+
+        ingredients.forEach((ing) => {
+          const parsed = parseIngredient(ing);
+          let q, unit, name;
+
+          if (parsed.raw || parsed.quantitat == null) {
+            const s = String(ing).trim();
+            const m = s.match(/^(\d+(?:[.,]\d+)?|\d+\s*\/\s*\d+)\s+([^\d]+)$/);
+            if (m) {
+              q = parseCantidad(m[1]);
+              const rest = m[2].trim();
+              const parts = rest.split(/\s+/);
+              const maybeUnit = normUnit(parts[0]);
+              const known = new Set(["g","kg","ml","cl","l","cullerada","culleradeta","tassa","u"]);
+              if (known.has(maybeUnit)) {
+                unit = maybeUnit;
+                name = singular(norm(parts.slice(1).join(" ")));
+              } else {
+                unit = "";
+                name = singular(norm(rest));
+              }
+            } else {
+              const key = (parsed.raw || parsed.text || String(ing)).trim().toLowerCase();
+              if (!key) return;
+              if (!mapa[key]) mapa[key] = { text: parsed.raw || parsed.text || String(ing).trim() };
+              return;
+            }
+          } else {
+            q = parsed.quantitat;
+            unit = normUnit(parsed.unitat || "");
+            name = singular(norm(parsed.nom));
+          }
+
+          if (!name) return;
+
+          const key = `${name}|${unit}`;
+          if (!mapa[key]) {
+            mapa[key] = { quantitat: q ?? null, unitat: unit, nom: name };
+          } else {
+            if (q != null) mapa[key].quantitat = (mapa[key].quantitat ?? 0) + q;
+          }
+        });
+
+        return Object.values(mapa);
+      }
+
+      function computeLlistaCompra(menu, receptes) {
+        const receptesMenu = Object.values(menu)
+          .flatMap((d) => Object.values(d))
+          .map((nom) => receptes.find((r) => r.nom === nom))
+          .filter(Boolean)
+          .map(normalizeRecepta);
+
+        const ingredients = receptesMenu.flatMap((r) => safeSplitLines(r.ingredients).filter(Boolean));
+        return agruparIngredients(ingredients);
+      }
+
+      function App() {
+        const [receptes, setReceptes] = useState([]);
+        const [formulari, setFormulari] = useState({ nom: "", categoria: "", ingredients: "", passos: "" });
+        const [editId, setEditId] = useState(null);
+        const [menu, setMenu] = useState({});
+        const [llistaCompra, setLlistaCompra] = useState([]);
+        const [noRepetir, setNoRepetir] = useState(true);
+        const [incloureDinar, setIncloureDinar] = useState(true);
+
+        useEffect(() => {
+          try {
+            const raw = localStorage.getItem("receptes");
+            if (!raw) return;
+            const parsed = JSON.parse(raw);
+            if (!Array.isArray(parsed)) return;
+            setReceptes(parsed.map(normalizeRecepta));
+          } catch (e) {
+            console.warn("No s'han pogut carregar les receptes", e);
+          }
+        }, []);
+
+        useEffect(() => {
+          try {
+            localStorage.setItem("receptes", JSON.stringify(receptes.map(normalizeRecepta)));
+          } catch (e) {
+            console.warn("No s'han pogut guardar les receptes", e);
+          }
+        }, [receptes]);
+
+        const handleSubmit = (e) => {
+          e.preventDefault();
+          const normalizedForm = normalizeRecepta({ ...formulari, id: editId ?? Date.now() });
+          const nomExists = receptes.some(
+            (r) => r.nom.toLowerCase() === normalizedForm.nom.toLowerCase() && r.id !== editId
+          );
+          if (nomExists) {
+            alert("Ja existeix una recepta amb aquest nom!");
+            return;
+          }
+          if (editId) {
+            setReceptes((prev) => prev.map((r) => (r.id === editId ? { ...normalizedForm } : r)));
+            setEditId(null);
+          } else {
+            setReceptes((prev) => [...prev, { ...normalizedForm }]);
+          }
+          setFormulari({ nom: "", categoria: "", ingredients: "", passos: "" });
+        };
+
+        const handleEdit = (recepta) => {
+          setFormulari(normalizeRecepta(recepta));
+          setEditId(recepta.id);
+        };
+
+        const handleDelete = (id) => {
+          setReceptes((prev) => prev.filter((r) => r.id !== id));
+        };
+
+        // --- AFEGIT: funció exportar PDF ---
+        const exportarPDF = () => {
+          const { jsPDF } = window.jspdf;
+          const doc = new jsPDF();
+
+          doc.setFontSize(18);
+          doc.text("Menú Setmanal", 14, 20);
+
+          const menuData = Object.entries(menu).map(([dia, menjars]) =>
+            incloureDinar
+              ? [dia, menjars.dinar || "-", menjars.sopar || "-"]
+              : [dia, menjars.sopar || "-"]
+          );
+
+          doc.autoTable({
+            startY: 30,
+            head: [incloureDinar ? ["Dia", "Dinar", "Sopar"] : ["Dia", "Sopar"]],
+            body: menuData,
+          });
+
+          let finalY = doc.lastAutoTable.finalY + 10;
+          doc.setFontSize(18);
+          doc.text("Llista de la compra", 14, finalY);
+
+          const compraData = llistaCompra.map((item) => [
+            item.text
+              ? item.text
+              : `${item.quantitat ?? ""} ${item.unitat} ${item.nom}`.trim(),
+          ]);
+
+          doc.autoTable({
+            startY: finalY + 5,
+            head: [["Ingredient"]],
+            body: compraData,
+          });
+
+          doc.save("menu_setmanal.pdf");
+        };
+
+        const generarMenu = () => {
+          if (receptes.length === 0) {
+            alert("Has d'afegir receptes abans de generar un menú.");
+            return;
+          }
+          const dies = ["Dilluns","Dimarts","Dimecres","Dijous","Divendres","Dissabte","Diumenge"];
+          const nouMenu = {};
+          if (noRepetir && incloureDinar && receptes.length < 14) {
+            alert("Necessites almenys 14 receptes sense repeticions (dinar i sopar).");
+            return;
+          }
+          if (noRepetir && !incloureDinar && receptes.length < 7) {
+            alert("Necessites almenys 7 receptes sense repeticions.");
+            return;
+          }
+          if (incloureDinar) {
+            if (noRepetir) {
+              const barrejades = [...receptes].sort(() => 0.5 - Math.random());
+              const seleccionades = barrejades.slice(0, 14);
+              const dies = ["Dilluns","Dimarts","Dimecres","Dijous","Divendres","Dissabte","Diumenge"];
+              dies.forEach((dia, i) => {
+                nouMenu[dia] = {
+                  dinar: seleccionades[i * 2]?.nom || "",
+                  sopar: seleccionades[i * 2 + 1]?.nom || "",
+                };
+              });
+            } else {
+              const dies = ["Dilluns","Dimarts","Dimecres","Dijous","Divendres","Dissabte","Diumenge"];
+              dies.forEach((dia) => {
+                const randomDinar = receptes[Math.floor(Math.random() * receptes.length)];
+                const randomSopar = receptes[Math.floor(Math.random() * receptes.length)];
+                nouMenu[dia] = { dinar: randomDinar.nom, sopar: randomSopar.nom };
+              });
+            }
+          } else {
+            if (noRepetir) {
+              const barrejades = [...receptes].sort(() => 0.5 - Math.random());
+              const seleccionades = barrejades.slice(0, 7);
+              const dies = ["Dilluns","Dimarts","Dimecres","Dijous","Divendres","Dissabte","Diumenge"];
+              dies.forEach((dia, i) => {
+                nouMenu[dia] = { dinar: "", sopar: seleccionades[i]?.nom || "" };
+              });
+            } else {
+              const dies = ["Dilluns","Dimarts","Dimecres","Dijous","Divendres","Dissabte","Diumenge"];
+              dies.forEach((dia) => {
+                const randomSopar = receptes[Math.floor(Math.random() * receptes.length)];
+                nouMenu[dia] = { dinar: "", sopar: randomSopar.nom };
+              });
+            }
+          }
+          setMenu(nouMenu);
+          setLlistaCompra(computeLlistaCompra(nouMenu, receptes));
+        };
+
+        const buidarMenu = () => {
+          setMenu({});
+          setLlistaCompra([]);
+        };
+
+        const handleMenuChange = (dia, tipus, value) => {
+          const nouMenu = { ...menu, [dia]: { ...menu[dia], [tipus]: value } };
+          setMenu(nouMenu);
+          setLlistaCompra(computeLlistaCompra(nouMenu, receptes));
+        };
+
+        return (
+          <div className="max-w-4xl mx-auto p-4 space-y-6">
+            <h1 className="text-3xl font-bold text-center">🍴 Menú Setmanal</h1>
+
+            {/* Formulari */}
+            <form onSubmit={handleSubmit} className="bg-white p-4 rounded-2xl shadow-lg space-y-2">
+              <input className="w-full p-2 border rounded"
+                placeholder="Nom de la recepta"
+                value={formulari.nom}
+                onChange={(e) => setFormulari({ ...formulari, nom: e.target.value })}
+                required/>
+              <input className="w-full p-2 border rounded"
+                placeholder="Categoria"
+                value={formulari.categoria}
+                onChange={(e) => setFormulari({ ...formulari, categoria: e.target.value })}/>
+              <textarea className="w-full p-2 border rounded"
+                placeholder="Ingredients (un per línia)"
+                value={formulari.ingredients}
+                onChange={(e) => setFormulari({ ...formulari, ingredients: e.target.value })}/>
+              <textarea className="w-full p-2 border rounded"
+                placeholder="Passos de preparació"
+                value={formulari.passos}
+                onChange={(e) => setFormulari({ ...formulari, passos: e.target.value })}/>
+              <div className="flex gap-2">
+                <button className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">
+                  {editId ? "Desar canvis" : "Afegir recepta"}
+                </button>
+                {editId && (
+                  <button type="button" onClick={() => {
+                      setEditId(null);
+                      setFormulari({ nom: "", categoria: "", ingredients: "", passos: "" });
+                    }}
+                    className="bg-gray-400 text-white px-4 py-2 rounded hover:bg-gray-500">
+                    Cancel·lar
+                  </button>
+                )}
+              </div>
+            </form>
+
+
+            {/* Receptes */}
+            <div className="grid md:grid-cols-2 gap-4">
+              {receptes.map((r) => (
+                <div key={r.id} className="bg-white p-4 rounded-2xl shadow">
+                  <div className="flex justify-between items-center">
+                    <h2 className="text-xl font-semibold">{r.nom}</h2>
+                    {r.categoria && <span className="bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs">{r.categoria}</span>}
+                  </div>
+                  <h3 className="font-medium mt-2">Ingredients:</h3>
+                  <ul className="list-disc list-inside text-sm">
+                    {safeSplitLines(r.ingredients).map((ing, i) => <li key={i}>{ing}</li>)}
+                  </ul>
+                  <h3 className="font-medium mt-2">Preparació:</h3>
+                  <p className="text-sm whitespace-pre-line">{r.passos}</p>
+                  <div className="flex gap-2 mt-3">
+                    <button onClick={() => handleEdit(r)} className="bg-yellow-400 px-3 py-1 rounded">Editar</button>
+                    <button onClick={() => handleDelete(r.id)} className="bg-red-500 text-white px-3 py-1 rounded">Eliminar</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Menú */}
+            <div className="bg-white p-4 rounded-2xl shadow">
+              <h2 className="text-2xl font-bold mb-2">🗓️ Menú Setmanal</h2>
+              <div className="flex items-center gap-3 mb-3 flex-wrap">
+                <button onClick={generarMenu} className="bg-green-500 text-white px-4 py-2 rounded">Generar menú</button>
+                <button onClick={buidarMenu} className="bg-red-500 text-white px-4 py-2 rounded">Buidar menú</button>
+                <label className="flex items-center gap-1 text-sm">
+                  <input type="checkbox" checked={noRepetir} onChange={(e) => setNoRepetir(e.target.checked)}/>
+                  Sense repeticions
+                </label>
+                <label className="flex items-center gap-1 text-sm">
+                  <input type="checkbox" checked={incloureDinar} onChange={(e) => setIncloureDinar(e.target.checked)}/>
+                  Incloure dinars
+
+                   {/* --- AFEGIT: botó Exportar PDF --- */}
+              <button onClick={exportarPDF} className="bg-purple-500 text-white px-4 py-2 rounded hover:bg-purple-600">
+                📄 Exportar a PDF
+              </button>
+
+                </label>
+              </div>
+              <div className="grid md:grid-cols-2 gap-2">
+                {Object.keys(menu).length === 0 && <p className="text-gray-500 italic">Encara no has generat cap menú.</p>}
+
+                {Object.entries(menu).map(([dia, menjars]) => (
+                  <div key={dia} className="border p-2 rounded bg-gray-50">
+                    <h3 className="font-semibold">{dia}</h3>
+
+                    {/* DINAR: SELECT en lloc d'INPUT */}
+                    <div className="flex items-center gap-2">
+                      <span>🥗 Dinar:</span>
+                      <select
+                        className="border rounded p-1 flex-1"
+                        value={menjars.dinar}
+                        onChange={(e) => handleMenuChange(dia, "dinar", e.target.value)}
+                      >
+                        <option value="">-- Tria recepta --</option>
+                        {menjars.dinar && !receptes.some(r => r.nom === menjars.dinar) && (
+                          <option value={menjars.dinar}>(personalitzat) {menjars.dinar}</option>
+                        )}
+                        {receptes.map((r) => (
+                          <option key={r.id} value={r.nom}>{r.nom}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* SOPAR: SELECT en lloc d'INPUT */}
+                    <div className="flex items-center gap-2 mt-1">
+                      <span>🌙 Sopar:</span>
+                      <select
+                        className="border rounded p-1 flex-1"
+                        value={menjars.sopar}
+                        onChange={(e) => handleMenuChange(dia, "sopar", e.target.value)}
+                      >
+                        <option value="">-- Tria recepta --</option>
+                        {menjars.sopar && !receptes.some(r => r.nom === menjars.sopar) && (
+                          <option value={menjars.sopar}>(personalitzat) {menjars.sopar}</option>
+                        )}
+                        {receptes.map((r) => (
+                          <option key={r.id} value={r.nom}>{r.nom}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Llista compra */}
+            <div className="bg-white p-4 rounded-2xl shadow">
+              <h2 className="text-2xl font-bold mb-2">🛒 Llista de la compra</h2>
+              {llistaCompra.length === 0 && <p className="text-gray-500 italic">Encara no hi ha ingredients.</p>}
+              <ul className="list-disc list-inside">
+                {llistaCompra.map((item, i) => (
+                  <li key={i}>
+                    {item.text ? item.text : `${item.quantitat ?? ""} ${item.unitat} ${item.nom}`.trim()}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        );
+      }
+
+      ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+    </script>
+  </body>
+</html>
